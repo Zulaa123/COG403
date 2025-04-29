@@ -1,12 +1,12 @@
 from datetime import timedelta
+import matplotlib.pyplot as plt
 from pyClarion import (
     Event, Agent, Priority, Input, Pool, Choice, ChunkStore,
     Family, NumDict, Atoms, Atom, Chunk, ks_crawl
 )
-import matplotlib.pyplot as plt
-
 
 """ Keyspace Definition """
+
 class Number(Atoms):
     _0: Atom
     _1: Atom
@@ -19,6 +19,11 @@ class Number(Atoms):
     _8: Atom
     _9: Atom
 
+
+class List(Atoms):
+    list: Atom
+
+
 class Value(Atoms):
     value: Atom
 
@@ -26,9 +31,11 @@ class Value(Atoms):
 class Memory(Family):
     number: Number
     value: Value
+    list: List
 
 
 """ Model Construction """
+
 class Participant(Agent):
     d: Memory
     input: Input
@@ -43,15 +50,17 @@ class Participant(Agent):
         super().__init__(name, p=p, e=e, d=d)
         self.d = d
         with self:
-            self.input = Input("input", (d, d))
             self.store = ChunkStore("store", d, d, d)
+            self.input = Input("input", self.store.chunks)
+            self.inhibition = Input("inhib", self.store.chunks)
             self.pool = Pool("pool", p, self.store.chunks, func=NumDict.sum)
-            self.choice = Choice("choice", p, self.store.chunks)
-        self.store.bu.input = self.input.main
+            self.choice = Choice("choice", p, self.store.chunks, sd=1e-3)
+        self.store.td.input = self.input.main
+        self.store.bu.input = self.store.td.main
         self.pool["store.bu"] = self.store.bu.main
 
         self.pool["inhibition"] = (
-            self.store.bu.main,
+            self.inhibition.main,
             lambda d: d.neg()
         )
         self.choice.input = self.pool.main
@@ -60,128 +69,119 @@ class Participant(Agent):
         if event.source == self.store.bu.update:
             self.choice.trigger()
 
-    def start_trial(
-        self,
-        dt: timedelta,
-        priority: Priority = Priority.PROPAGATION
-    ) -> None:
-        self.system.schedule(self.start_trial, dt=dt, priority=priority)
 
-    def finish_trial(
-        self,
-        dt: timedelta,
-        priority: Priority = Priority.PROPAGATION
-    ) -> None:
-        self.system.schedule(self.finish_trial, dt=dt, priority=priority)
+""" Knowledge Initialization (NO Chunking) """
 
+def init_stimuli_no_chunking(memory: Memory, list_data: list[str], num: int) -> list[Chunk]:
+    """ Initialize stimuli without chunking.
+    """
+    number, value, lst = memory.number, memory.value, memory.list
 
-# This is the condition with no chunking/grouping
-""" Knowledge Initialization (without chunking) """
-def init_stimuli_no_chunking(memory: Memory, list_data: list[str]) -> list[Chunk]:
-    number, value = memory.number, memory.value
+    # Create a list chunk for the number
+    list_chunk = f"list_{num}" ^ +lst.list ** number[f"_{num}"]
+    chunks = [list_chunk]
 
-    chunks = []
-
-    # Create individual chunks for each digit without grouping
+    # For each digit, directly associate it with the list
     for i, digit in enumerate(list_data[0]):
-        chunk = f"digit_{i}" ^ +value.value**number[f"_{digit}"]
-        chunks.append(chunk)
+        c = (
+            f"v_{i}" ^ +list_chunk
+            + value.value ** number[f"_{digit}"]
+        )
+        chunks.append(c)
 
     return chunks
 
 
-def build_recall_cue(memory: Memory, target_digit: str, position: int) -> Chunk:
-    number, value = memory.number, memory.value
-
-    cue = (
-        f"recall_cue_{position}" ^
-        +value.value**number[f"_{target_digit}"]
-    )
-    return cue
-
-
-""" Event Processing (No Chunking) """
-participant = Participant("participant_no_chunking")
+""" Event Processing """
+# Initialize participant and number list
+participant = Participant("participant")
 number_list = [
-    "123456789", "987654321", "456789123", "321654987",
-    "789123456", "654321789", "234567890"
+    "123456789", "222333444", "555666777", "888999000",
+    "098178322", "111122233", "632876343"
 ]
-results_no_chunking = []
+results = []
+list_cues = []
 
-# Loop through sequences
+
+# Loop through sequences for chunk compile
 for trial_idx, sequence in enumerate(number_list):
     # --- Study Phase ---
-    stimuli = init_stimuli_no_chunking(participant.d, [sequence])
+    stimuli = init_stimuli_no_chunking(participant.d, [sequence], trial_idx)
+    list_cues.append(stimuli[0])
 
     for chunk in stimuli:
         participant.store.compile(chunk)
 
-    # Advance system after compilation (ensure everything is processed)
+    # Advance system after compilation
     while participant.system.queue:
         participant.system.advance()
 
+# Loop through sequences for recall
+for trial_idx, sequence in enumerate(number_list):
     # --- Recall Phase ---
     recalled = ""
+    cue = list_cues[trial_idx]
 
-    for i, target_digit in enumerate(sequence):
-        cue = build_recall_cue(participant.d, target_digit, i)
-        participant.input.send(cue)
+    participant.input.send({cue: 1})
+    participant.inhibition.send({cue: 1})
 
-        while participant.system.queue:
-            participant.system.advance()
-
-        try:
+    while participant.system.queue:
+        event = participant.system.advance()
+        if event.source == participant.choice.select:
             response_key = participant.choice.poll()[~participant.store.chunks]
+            response = ks_crawl(participant.system.root, response_key)
 
-            if response_key is not None:
-                response = ks_crawl(participant.system.root, response_key)
+            if response and response._name_.startswith("v"):
+                digit = str(response)[-1]
+                recalled += digit
 
-                if response and "digit_" in response._name_:
-                    digit = str(response)[-1]
-                    recalled += digit
-                else:
-                    recalled += "?"
-            else:
-                recalled += "?"
-        except Exception as e:
-            print(f"Error during recall: {e}")
-            recalled += "?"
+            if response != participant.store.chunks.nil:
+                wm = {response_key: 1, **participant.input.main[0].d}
+                participant.inhibition.send(wm)
+                participant.input.send(wm)
 
     # --- Store Results ---
     correct = recalled == sequence[:len(recalled)]
-    correct_rate = sum(1 for a, b in zip(recalled, sequence) if a == b) / len(sequence)
-    correct_digits = sum(1 for digit in set(sequence) if digit in recalled) / len(sequence)
-    results_no_chunking.append({
+    correct_order = sum(1 for a, b in zip(sequence, recalled) if a == b)
+    correct_digits = sum(1 for digit in sequence if digit in recalled)
+    results.append({
         "trial": trial_idx + 1,
         "stim": sequence,
         "response": recalled,
-        "correct order rate": correct_rate,
-        "correct digits rate": correct_digits
+        "correct recall": correct_order / len(sequence),
+        "correct order recall": correct_digits / len(sequence)
     })
 
+
 # --- Print Results ---
-for result in results_no_chunking:
-    print(
-        f"Trial {result['trial']}: Stimulus: {result['stim']}, Response: {result['response']}, "
-        f"Correct Order Rate: {result['correct order rate']:.2f}, Correct Digits Rate: {result['correct digits rate']:.2f}"
-    )
+for result in results:
+    print(f"Trial {result['trial']}:")
+    print(f"Stimulus: {result['stim']}")
+    print(f"Response: {result['response']}")
+    print(f"Correct Rate (with order): {result['correct recall']:.2f}")
+    print(f"Correct Digits Rate (without order): {result['correct order recall']:.2f}")
+    print("-" * 30)
 
+  
 # --- Plot Results ---
-trial_numbers = [r['trial'] for r in results_no_chunking]
-correct_order_rates = [r['correct order rate'] for r in results_no_chunking]
-correct_digits_rates = [r['correct digits rate'] for r in results_no_chunking]
+trials = [r['trial'] for r in results]
+correct_rates = [r['correct recall'] for r in results]
+correct_digits = [r['correct order recall'] for r in results]
 
-plt.figure(figsize=(10, 6))
+plt.figure(figsize=(6, 4))
 
-plt.plot(trial_numbers, correct_order_rates, label="Correct Recall Rate (with order)", marker='o')
-plt.plot(trial_numbers, correct_digits_rates, label="Correct Recall Rate (without order)", marker='s')
+plt.plot(trials, correct_rates, label="With Order", marker='o')
+plt.plot(trials, correct_digits, label="Without Order", marker='x')
 
-plt.title("Recall Performance (No Chunking)")
-plt.xlabel("Trial Number")
-plt.ylabel("Recall Rate")
+plt.title("Recall Accuracy Across Trials (No Chunking)", fontsize=12, fontname="Arial")
+plt.xlabel("Trial", fontsize=11, fontname="Arial")
+plt.ylabel("Correct Recall Rate", fontsize=11, fontname="Arial")
+plt.xticks(trials, fontsize=10, fontname="Arial")
+plt.yticks(fontsize=10, fontname="Arial")
+
 plt.ylim(0, 1.1)
-plt.xticks(trial_numbers)
-plt.legend()
-plt.grid(True)
+plt.legend(title="Recall Type", fontsize=10, title_fontsize=11, prop={"family": "Arial"})
+plt.grid(True, linestyle='--', linewidth=0.5)
 
 plt.show()
+
