@@ -2,6 +2,14 @@
 
 This project explores working memory capacity limitations using the pyClarion agent, a cognitive modeling framework. The aim is to simulate and analyze how working memory constraints affect cognitive processes.
 
+## Commit Tag
+The latest commit for review is 7d5557f.
+
+## Folder and File Structure
+This repository has a simple structure. The project involves two files: no_chunking_demo.py and chunking_demo.py.
+These two files will run simulations, print results and plot them when you run each file. Both files are in
+one folder COG403. 
+
 ## Features
 
 - Implementation of pyClarion agent models.
@@ -23,14 +31,10 @@ This project explores working memory capacity limitations using the pyClarion ag
    ```bash
    cd cog403
    ```
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
 
 ## Usage
 
-Run the main script to start simulations:
+Run the main script to start simulations in No-Chunking and Chunking condition on bash.
 
 ```bash
 python no_chunking_demo.py
